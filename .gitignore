@@ -1,0 +1,87 @@
+# Dependencies
+node_modules
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Build outputs
+dist
+dist-electron
+release
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS files
+Thumbs.db
+.DS_Store
+nul
+
+# Documentation files (keep only essential ones)
+docs/
+Adit.md
+AI-PROVIDERS.md
+IMPLEMENTATION.md
+IMPLEMENTATION_COMPLETE.md
+IMPLEMENTATION_STATUS.md
+My-view.md
+NEW_FEATURES_PLAN.md
+prompt.md
+QUICK_START.md
+QUICK_START_SECURITY.md
+REFINEMENTS.md
+REMEDIATION_SUMMARY.md
+SECURITY_AUDIT_FOR_WHATSAPP.md
+SECURITY_AUDIT_REPORT.md
+START_APP.md
+TESTING.md
+WHITE_SCREEN_FIX.md
+
+# Other unnecessary files
+*.json.backup
+spacemail_passwords_*.json
+cPanel_*.js
+.env.example
+Python_notify_Watcher/
+.claude/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Test coverage
+coverage
+*.lcov
+.nyc_output
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Electron specific
+out/
+electron/dist/
+app/dist/
+*.asar
+
+# Security
+.master.key
+*.pem
+*.pfx
+credentials.json

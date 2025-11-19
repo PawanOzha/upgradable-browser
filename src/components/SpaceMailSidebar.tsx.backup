@@ -1,0 +1,1234 @@
+/**
+ * SpaceMail Password Manager Sidebar
+ *
+ * UI component for visualizing and managing SpaceMail domains and mailboxes.
+ * Features domain-grouped display with expandable sections.
+ *
+ * @author Claude Code
+ * @version 1.0.0
+ */
+
+import { useState, useEffect } from 'react';
+import {
+  X,
+  Mail,
+  RefreshCw,
+  Key,
+  ChevronDown,
+  ChevronRight,
+  CheckCircle,
+  XCircle,
+  Shield,
+  Play,
+  Pause,
+  AlertCircle,
+} from 'lucide-react';
+import {
+  generateSecurePassword,
+  createGoogleSheetsUpdateScript,
+  createPasswordPasteScript
+} from '../tools/google_sheets_password_tracker';
+
+interface SpaceMailSidebarProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+interface Mailbox {
+  email: string;
+  domain: string;
+  username: string;
+  hasEditButton: boolean;
+}
+
+interface Domain {
+  name: string;
+  mailboxes: Mailbox[];
+  isExpanded: boolean;
+}
+
+interface UpdateProgress {
+  current: number;
+  total: number;
+  status: 'idle' | 'running' | 'paused' | 'completed';
+  results: Array<{
+    email: string;
+    success: boolean;
+    error?: string;
+  }>;
+}
+
+export default function SpaceMailSidebar({ isOpen, onClose }: SpaceMailSidebarProps) {
+  const [domains, setDomains] = useState<Domain[]>([]);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [selectedMailbox, setSelectedMailbox] = useState<string | null>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress>({
+    current: 0,
+    total: 0,
+    status: 'idle',
+    results: [],
+  });
+  const [updateLog, setUpdateLog] = useState<string[]>([]);
+  const [googleSheetsTabId, setGoogleSheetsTabId] = useState<string | null>(null);
+  const [spaceMailTabId, setSpaceMailTabId] = useState<string | null>(null);
+
+  const handleExtract = async () => {
+    setIsExtracting(true);
+    setSelectedMailbox(null);
+
+    try {
+      const webview = document.querySelector('webview') as any;
+      if (!webview) {
+        alert('Webview not found');
+        setIsExtracting(false);
+        return;
+      }
+
+      const result = await webview.executeJavaScript(`
+        (async function() {
+          // Import extraction logic
+          const extractEmail = (element) => {
+            // Email regex that FINDS email within text (not just exact match)
+            const emailRegex = /[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/;
+
+            // Check element's own text
+            const text = element.textContent?.trim() || '';
+            const match = text.match(emailRegex);
+            if (match) return match[0];
+
+            // Check all spans inside (SpaceMail often splits email across spans)
+            const spans = element.querySelectorAll('span');
+            if (spans.length >= 2) {
+              let combined = '';
+              spans.forEach(span => combined += span.textContent?.trim() || '');
+              const spanMatch = combined.match(emailRegex);
+              if (spanMatch) return spanMatch[0];
+            }
+
+            // Check individual spans
+            for (const span of spans) {
+              const spanText = span.textContent?.trim() || '';
+              const spanMatch = spanText.match(emailRegex);
+              if (spanMatch) return spanMatch[0];
+            }
+
+            // Check all td cells in the row
+            const cells = element.querySelectorAll('td');
+            for (const cell of cells) {
+              const cellText = cell.textContent?.trim() || '';
+              const cellMatch = cellText.match(emailRegex);
+              if (cellMatch) return cellMatch[0];
+            }
+
+            return null;
+          };
+
+          const hasEditButton = (element) => {
+            const parent = element.closest('tr');
+            if (!parent) return false;
+
+            const buttons = parent.querySelectorAll('button, a');
+            for (const btn of buttons) {
+              const text = (btn.textContent?.toLowerCase() || '') + (btn.getAttribute('aria-label')?.toLowerCase() || '');
+              if (text.includes('edit') || text.includes('options') || text.includes('menu') || btn.querySelector('svg')) {
+                return true;
+              }
+            }
+            return false;
+          };
+
+          console.log('[SpaceMail Extract] Starting extraction...');
+
+          const domainsMap = new Map();
+          const tables = document.querySelectorAll('.smm-mailboxes-table, table.gb-table, table');
+
+          console.log('[SpaceMail Extract] Found', tables.length, 'tables');
+
+          tables.forEach((table, index) => {
+            // Find domain name - multiple strategies
+            let domainName = null;
+
+            // Strategy 1: Look in parent container for headings (h1, h2, h3, div with domain)
+            const container = table.closest('section, div, article') || table.parentElement;
+            if (container) {
+              const headings = container.querySelectorAll('h1, h2, h3, h4, h5, div, span, p');
+              for (const heading of headings) {
+                if (heading.contains(table)) continue; // Skip if heading is inside table
+                const text = heading.textContent?.trim() || '';
+                const match = text.match(/([a-zA-Z0-9-]+\\.[a-zA-Z]{2,})/);
+                if (match) {
+                  domainName = match[1];
+                  break;
+                }
+              }
+            }
+
+            // Strategy 2: Look at previous siblings
+            if (!domainName) {
+              let current = table.previousElementSibling;
+              for (let i = 0; i < 3 && current; i++) {
+                const text = current.textContent?.trim() || '';
+                const match = text.match(/([a-zA-Z0-9-]+\\.[a-zA-Z]{2,})/);
+                if (match) {
+                  domainName = match[1];
+                  break;
+                }
+                current = current.previousElementSibling;
+              }
+            }
+
+            // Strategy 3: Look at parent's previous siblings
+            if (!domainName) {
+              let current = table.parentElement;
+              for (let i = 0; i < 5 && current; i++) {
+                const text = current.textContent?.trim() || '';
+                const match = text.match(/([a-zA-Z0-9-]+\\.[a-zA-Z]{2,})/);
+                if (match) {
+                  domainName = match[1];
+                  break;
+                }
+                current = current.previousElementSibling || current.parentElement;
+              }
+            }
+
+            // Strategy 4: Extract from first email in table
+            if (!domainName) {
+              const rows = table.querySelectorAll('tr');
+              for (const row of rows) {
+                const email = extractEmail(row);
+                if (email && email.includes('@')) {
+                  domainName = email.split('@')[1];
+                  break;
+                }
+              }
+            }
+
+            // Fallback: unknown domain
+            if (!domainName) {
+              domainName = 'unknown-domain-' + index;
+            }
+
+            console.log('[SpaceMail Extract] Table', index, '→ Domain:', domainName);
+
+            const mailboxes = [];
+            const seenEmails = new Set(); // Track unique emails
+            const rows = table.querySelectorAll('tr, tbody > tr');
+
+            console.log('[SpaceMail Extract] Processing', rows.length, 'rows in table', index);
+
+            rows.forEach((row, rowIndex) => {
+              const email = extractEmail(row);
+              if (email && !seenEmails.has(email)) {
+                seenEmails.add(email); // Mark as seen
+
+                const username = email.split('@')[0];
+                const domain = email.split('@')[1];
+
+                mailboxes.push({
+                  email,
+                  domain,
+                  username,
+                  hasEditButton: hasEditButton(row),
+                });
+
+                // Log first 3 unique emails for debugging
+                if (mailboxes.length <= 3) {
+                  console.log('[SpaceMail Extract] Found email:', email, '(hasEdit:', hasEditButton(row), ')');
+                }
+              }
+            });
+
+            console.log('[SpaceMail Extract] Extracted', mailboxes.length, 'unique mailboxes from domain', domainName);
+
+            // Only add domains that have mailboxes
+            if (mailboxes.length > 0) {
+              if (domainsMap.has(domainName)) {
+                domainsMap.get(domainName).push(...mailboxes);
+              } else {
+                domainsMap.set(domainName, mailboxes);
+              }
+            }
+          });
+
+          // Deduplicate mailboxes within each domain
+          const domains = [];
+          domainsMap.forEach((mailboxes, domainName) => {
+            // Create a map to track unique emails per domain
+            const uniqueMailboxes = new Map();
+
+            mailboxes.forEach(mailbox => {
+              if (!uniqueMailboxes.has(mailbox.email)) {
+                uniqueMailboxes.set(mailbox.email, mailbox);
+              }
+            });
+
+            // Convert back to array
+            const deduplicatedMailboxes = Array.from(uniqueMailboxes.values());
+
+            console.log('[SpaceMail Extract] Domain', domainName, ':', mailboxes.length, 'total →', deduplicatedMailboxes.length, 'unique');
+
+            domains.push({
+              name: domainName,
+              mailboxes: deduplicatedMailboxes,
+              isExpanded: true,
+            });
+          });
+
+          console.log('[SpaceMail Extract] Extracted', domains.length, 'domains');
+
+          return domains;
+        })();
+      `);
+
+      setDomains(result);
+      console.log('Extracted domains:', result);
+    } catch (error) {
+      console.error('Failed to extract:', error);
+      alert('Failed to extract SpaceMail data. Make sure you are on the admin dashboard.');
+    } finally {
+      setIsExtracting(false);
+    }
+  };
+
+  const handleHighlightMailbox = async (email: string) => {
+    setSelectedMailbox(email);
+
+    try {
+      const webview = document.querySelector('webview') as any;
+      if (!webview) return;
+
+      await webview.executeJavaScript(`
+        (function() {
+          // Clear previous highlights
+          document.querySelectorAll('[data-spacemail-highlight]').forEach(el => {
+            el.style.outline = '';
+            el.style.outlineOffset = '';
+            el.style.boxShadow = '';
+            el.removeAttribute('data-spacemail-highlight');
+          });
+
+          // Find and highlight target
+          const email = "${email}";
+          const rows = document.querySelectorAll('tr, tbody > tr');
+
+          for (const row of rows) {
+            if (row.textContent?.includes(email)) {
+              row.style.outline = '3px solid #f59e0b';
+              row.style.outlineOffset = '-3px';
+              row.style.boxShadow = '0 0 20px rgba(245, 158, 11, 0.6)';
+              row.style.transition = 'all 0.3s ease-in-out';
+              row.setAttribute('data-spacemail-highlight', 'true');
+
+              row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              break;
+            }
+          }
+        })();
+      `);
+    } catch (error) {
+      console.error('Failed to highlight:', error);
+    }
+  };
+
+  const handleUpdatePassword = async (email: string, dryRun: boolean = true) => {
+    const addLog = (msg: string) => {
+      console.log(`[SpaceMail] ${msg}`);
+      setUpdateLog(prev => [...prev, msg]);
+    };
+
+    try {
+      const webview = document.querySelector('webview') as any;
+      if (!webview) {
+        alert('Webview not found');
+        return;
+      }
+
+      addLog(`🔐 Starting Google Sheets password workflow for ${email} ${dryRun ? '(DRY RUN)' : '(LIVE)'}`);
+      setIsUpdating(true);
+
+      // ============================================================
+      // PHASE 1: Open Google Sheets and Update Password
+      // ============================================================
+
+      // Step 1: Get bookmark URL
+      addLog('📊 Step 1: Looking up bookmark "DomainLevelPwdChange"...');
+      const bookmarks = await (window as any).bookmarks?.getAll?.();
+
+      if (!bookmarks || !bookmarks.bookmarks) {
+        throw new Error('Failed to load bookmarks');
+      }
+
+      const bookmark = bookmarks.bookmarks.find(
+        (b: any) => b.title === 'DomainLevelPwdChange'
+      );
+
+      if (!bookmark) {
+        throw new Error('Bookmark "DomainLevelPwdChange" not found. Please create it first.');
+      }
+
+      addLog(`✅ Found bookmark: ${bookmark.url}`);
+
+      // Step 2: Generate password
+      const password = generateSecurePassword();
+      addLog(`🔑 Generated secure password (16 chars)`);
+
+      // Step 3: Save current tab URL (SpaceMail)
+      const spaceMailUrl = await webview.executeJavaScript('window.location.href');
+      addLog(`📍 Current SpaceMail URL saved`);
+
+      // Step 4: Navigate to Google Sheets
+      addLog(`📊 Step 2: Opening Google Sheets...`);
+      webview.src = bookmark.url;
+
+      // Wait for Google Sheets to load
+      await new Promise((resolve) => {
+        let attempts = 0;
+        const checkLoad = setInterval(async () => {
+          try {
+            const loaded = await webview.executeJavaScript(
+              'document.readyState === "complete" && document.body !== null'
+            );
+            if (loaded) {
+              clearInterval(checkLoad);
+              resolve(true);
+            }
+          } catch (e) {
+            // Still loading
+          }
+          attempts++;
+          if (attempts > 30) { // 15 second timeout
+            clearInterval(checkLoad);
+            resolve(false);
+          }
+        }, 500);
+      });
+
+      addLog('✅ Google Sheets loaded');
+      await new Promise(resolve => setTimeout(resolve, 2000)); // Extra wait
+
+      // Step 5: Update Google Sheets with email and password
+      addLog('📝 Step 3: Updating Google Sheets (A2=email, B2=password)...');
+
+      const sheetsScript = createGoogleSheetsUpdateScript(email, password);
+      const sheetsResult = await webview.executeJavaScript(sheetsScript);
+
+      if (!sheetsResult.success) {
+        throw new Error(sheetsResult.error || 'Failed to update Google Sheets');
+      }
+
+      addLog('✅ Google Sheets updated successfully');
+      addLog(`✅ Password copied to clipboard`);
+
+      // Step 6: Navigate back to SpaceMail
+      addLog('🔙 Step 4: Returning to SpaceMail...');
+      webview.src = spaceMailUrl;
+
+      // Wait for SpaceMail to reload
+      await new Promise((resolve) => {
+        let attempts = 0;
+        const checkLoad = setInterval(async () => {
+          try {
+            const loaded = await webview.executeJavaScript(
+              'document.readyState === "complete"'
+            );
+            if (loaded) {
+              clearInterval(checkLoad);
+              resolve(true);
+            }
+          } catch (e) {
+            // Still loading
+          }
+          attempts++;
+          if (attempts > 30) {
+            clearInterval(checkLoad);
+            resolve(false);
+          }
+        }, 500);
+      });
+
+      addLog('✅ Back to SpaceMail');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // ============================================================
+      // PHASE 2: SpaceMail Password Change Workflow
+      // ============================================================
+
+      addLog('🔐 Step 5: Starting SpaceMail password change...');
+
+      // Execute SpaceMail workflow (click edit, reset password, etc.)
+      const spaceMailWorkflow = await webview.executeJavaScript(`
+        (async function() {
+          const DRY_RUN = ${dryRun};
+          const log = (msg) => console.log('[SpaceMail Update]', msg);
+          const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+          const randomDelay = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+          // Step 1: Find the mailbox row for this email
+          log('Step 1: Finding mailbox row for ${email}');
+
+          const rows = document.querySelectorAll('tr');
+          let targetRow = null;
+
+          for (const row of rows) {
+            if (row.textContent?.includes('${email}')) {
+              targetRow = row;
+              break;
+            }
+          }
+
+          if (!targetRow) {
+            return { success: false, error: 'Mailbox row not found' };
+          }
+
+          log('✅ Found mailbox row');
+
+          // Step 2: Human-like scroll to element
+          log('Step 2: Scrolling to mailbox...');
+          targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          await sleep(randomDelay(400, 800)); // Wait for scroll
+
+          // Step 3: Thinking pause before click
+          await sleep(randomDelay(300, 700));
+
+          // Step 4: Click on the mailbox row to open sidebar
+          log('Step 3: Clicking mailbox row...');
+          targetRow.click();
+
+          // Wait for sidebar to open
+          await sleep(randomDelay(800, 1500));
+
+          // Step 5: Find "Reset password" button in the sidebar
+          log('Step 4: Looking for "Reset password" option...');
+
+          let resetButton = null;
+          const buttons = document.querySelectorAll('button, a, div[role="button"]');
+
+          for (const btn of buttons) {
+            const text = btn.textContent?.toLowerCase() || '';
+            if (text.includes('reset password') || text.includes('reset') || text.includes('change password')) {
+              resetButton = btn;
+              log('✅ Found reset button:', text);
+              break;
+            }
+          }
+
+          if (!resetButton) {
+            // Try alternative selectors
+            const alternatives = [
+              'button[aria-label*="reset" i]',
+              'a[aria-label*="reset" i]',
+              'button[aria-label*="password" i]',
+              '[data-action*="reset"]',
+              '[data-action*="password"]'
+            ];
+
+            for (const selector of alternatives) {
+              const el = document.querySelector(selector);
+              if (el) {
+                resetButton = el;
+                log('✅ Found reset button via selector:', selector);
+                break;
+              }
+            }
+          }
+
+          if (!resetButton) {
+            return { success: false, error: 'Reset password button not found in sidebar' };
+          }
+
+          // Step 6: Human thinking pause
+          await sleep(randomDelay(400, 900));
+
+          // Step 7: Click "Reset password"
+          log('Step 5: Clicking "Reset password"...');
+          resetButton.click();
+
+          // Wait for input area to appear
+          await sleep(randomDelay(800, 1500));
+
+          // Step 8: Find the "New Password" input field
+          log('Step 6: Looking for password input...');
+
+          let passwordInput = null;
+          const inputs = document.querySelectorAll('input');
+
+          for (const input of inputs) {
+            const type = input.type?.toLowerCase();
+            const placeholder = input.placeholder?.toLowerCase() || '';
+            const label = input.getAttribute('aria-label')?.toLowerCase() || '';
+            const name = input.name?.toLowerCase() || '';
+
+            if (type === 'password' ||
+                placeholder.includes('password') ||
+                placeholder.includes('new password') ||
+                label.includes('password') ||
+                name.includes('password')) {
+              passwordInput = input;
+              log('✅ Found password input');
+              break;
+            }
+          }
+
+          if (!passwordInput) {
+            return { success: false, error: 'Password input field not found' };
+          }
+
+          log('Reset password dialog opened - ready for password paste');
+          return { success: true, message: 'Ready for password input' };
+
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      })();
+    `);
+
+    if (!spaceMailWorkflow.success) {
+      throw new Error(spaceMailWorkflow.error);
+    }
+
+    addLog('✅ Reset password dialog opened');
+
+    // Step 7: Paste password with Ctrl+V
+    addLog('📋 Step 6: Pasting password from clipboard with Ctrl+V...');
+
+    const pasteScript = createPasswordPasteScript(dryRun);
+    const pasteResult = await webview.executeJavaScript(pasteScript);
+
+    if (!pasteResult.success) {
+      throw new Error(pasteResult.error || 'Failed to paste password');
+    }
+
+    if (dryRun) {
+      addLog('🧪 DRY RUN COMPLETE - Password pasted, Save button ready');
+      addLog(`✅ Everything ready! Password is in Google Sheets Row 2.`);
+      addLog(`✅ To actually save, click again without dry run mode.`);
+    } else {
+      addLog('✅✅✅ PASSWORD UPDATED AND SAVED SUCCESSFULLY!');
+      addLog(`📊 Password logged in Google Sheets (DomainLevelPwdChange)`);
+    }
+
+    // Save result to progress
+    setUpdateProgress(prev => ({
+      ...prev,
+      results: [...prev.results, { email, success: true }]
+    }));
+
+    setIsUpdating(false);
+
+  } catch (error: any) {
+    addLog(`❌ Error: ${error.message}`);
+    console.error('Password update error:', error);
+    setUpdateProgress(prev => ({
+      ...prev,
+      results: [...prev.results, { email, success: false, error: error.message }]
+    }));
+    setIsUpdating(false);
+  }
+};
+
+  const handleUpdateAll = async (dryRun: boolean = true) => {
+    const allMailboxes = domains.flatMap(d => d.mailboxes);
+            const numbers = '0123456789';
+            const symbols = '!@#$%^&*()_+-=';
+            const all = upper + lower + numbers + symbols;
+
+            let pwd = '';
+            pwd += upper[Math.floor(Math.random() * upper.length)];
+            pwd += lower[Math.floor(Math.random() * lower.length)];
+            pwd += numbers[Math.floor(Math.random() * numbers.length)];
+            pwd += symbols[Math.floor(Math.random() * symbols.length)];
+
+            for (let i = 4; i < 16; i++) {
+              pwd += all[Math.floor(Math.random() * all.length)];
+            }
+
+            return pwd.split('').sort(() => Math.random() - 0.5).join('');
+          };
+
+          const newPassword = generatePassword();
+          log('Step 7: Generated secure password');
+
+          // Step 10: Focus input with real click (triggers React onFocus)
+          log('Step 7.5: Clicking password input to focus...');
+          passwordInput.click();
+          passwordInput.focus();
+          await sleep(randomDelay(200, 400));
+
+          // Step 11: Reset input value (prepare for typing)
+          log('Step 8: Clearing password input...');
+
+          // Clear by simulating proper backspace events
+          while (passwordInput.value.length > 0) {
+            const currentValue = passwordInput.value;
+
+            // Dispatch backspace keydown
+            passwordInput.dispatchEvent(new KeyboardEvent('keydown', {
+              key: 'Backspace',
+              code: 'Backspace',
+              keyCode: 8,
+              which: 8,
+              bubbles: true,
+              cancelable: true
+            }));
+
+            // Remove character
+            passwordInput.value = currentValue.slice(0, -1);
+
+            // Dispatch input event
+            passwordInput.dispatchEvent(new InputEvent('input', {
+              data: null,
+              inputType: 'deleteContentBackward',
+              bubbles: true,
+              cancelable: true
+            }));
+
+            // Dispatch keyup
+            passwordInput.dispatchEvent(new KeyboardEvent('keyup', {
+              key: 'Backspace',
+              code: 'Backspace',
+              keyCode: 8,
+              which: 8,
+              bubbles: true,
+              cancelable: true
+            }));
+          }
+
+          await sleep(randomDelay(100, 200));
+          log('✅ Input cleared with keyboard events');
+
+          // Step 11.5: Human-like typing with REAL keyboard events (per-character simulation)
+          log('Step 9: Typing password with real keyboard event chain...');
+
+          // Helper to dispatch COMPLETE keyboard event chain per character
+          const typeChar = (char, isBackspace = false) => {
+            const key = isBackspace ? 'Backspace' : char;
+
+            // Generate proper key code (handle special characters)
+            let code = 'Backspace';
+            if (!isBackspace) {
+              const upper = char.toUpperCase();
+              if (/[A-Z]/.test(upper)) {
+                code = 'Key' + upper;
+              } else if (/[0-9]/.test(char)) {
+                code = 'Digit' + char;
+              } else {
+                // Special characters use generic code
+                code = char;
+              }
+            }
+
+            const charCode = isBackspace ? 8 : char.charCodeAt(0);
+
+            // 1. keyDown event
+            const keydownEvent = new KeyboardEvent('keydown', {
+              key: key,
+              code: code,
+              keyCode: charCode,
+              which: charCode,
+              charCode: 0,
+              bubbles: true,
+              cancelable: true,
+              composed: true
+            });
+            passwordInput.dispatchEvent(keydownEvent);
+
+            // 2. keyPress event (deprecated but some forms still use it)
+            if (!isBackspace) {
+              const keyPressEvent = new KeyboardEvent('keypress', {
+                key: char,
+                code: code,
+                keyCode: charCode,
+                which: charCode,
+                charCode: charCode,
+                bubbles: true,
+                cancelable: true,
+                composed: true
+              });
+              passwordInput.dispatchEvent(keyPressEvent);
+            }
+
+            // 3. Manually update the value (simulating what the browser would do)
+            const previousValue = passwordInput.value;
+            if (isBackspace) {
+              passwordInput.value = previousValue.slice(0, -1);
+            } else {
+              passwordInput.value = previousValue + char;
+            }
+
+            // 4. input event (CRITICAL - this is what React/Vue listen to)
+            const inputEvent = new InputEvent('input', {
+              data: isBackspace ? null : char,
+              inputType: isBackspace ? 'deleteContentBackward' : 'insertText',
+              bubbles: true,
+              cancelable: true,
+              composed: true
+            });
+            passwordInput.dispatchEvent(inputEvent);
+
+            // 5. keyUp event
+            const keyupEvent = new KeyboardEvent('keyup', {
+              key: key,
+              code: code,
+              keyCode: charCode,
+              which: charCode,
+              charCode: 0,
+              bubbles: true,
+              cancelable: true,
+              composed: true
+            });
+            passwordInput.dispatchEvent(keyupEvent);
+          };
+
+          const chars = newPassword.split('');
+          for (let i = 0; i < chars.length; i++) {
+            const char = chars[i];
+
+            // 3% chance of typo
+            if (Math.random() < 0.03 && i > 0) {
+              const wrongChar = String.fromCharCode(char.charCodeAt(0) + (Math.random() > 0.5 ? 1 : -1));
+
+              // Type wrong character with real events
+              typeChar(wrongChar);
+              await sleep(randomDelay(80, 140));
+
+              await sleep(randomDelay(200, 400)); // Realize mistake
+
+              // Backspace with real events
+              typeChar('', true);
+              await sleep(randomDelay(80, 140));
+            }
+
+            // Type correct character with real events
+            typeChar(char);
+
+            let delay = randomDelay(80, 140);
+            if (Math.random() < 0.1) delay += randomDelay(200, 500); // Occasional pause
+
+            await sleep(delay);
+          }
+
+          // Final validation trigger (CRITICAL - blur activates form validation)
+          log('Step 10: Triggering form validation with blur event...');
+
+          // Dispatch blur event (this is what activates validation in React forms)
+          const blurEvent = new FocusEvent('blur', {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            relatedTarget: null
+          });
+          passwordInput.blur();
+          passwordInput.dispatchEvent(blurEvent);
+
+          await sleep(randomDelay(300, 500));
+
+          log('✅ Password typed and blur event dispatched - form should validate now');
+
+          // Step 12: Wait for Save button to become enabled (with retry mechanism)
+          log('Step 11: Waiting for Save button to activate...');
+
+          let saveButton = null;
+          let attempts = 0;
+          const maxAttempts = 30; // Wait up to 15 seconds (30 * 500ms)
+
+          while (attempts < maxAttempts) {
+            const allButtons = document.querySelectorAll('button, a, div[role="button"]');
+
+            for (const btn of allButtons) {
+              const text = btn.textContent?.toLowerCase() || '';
+              const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || '';
+
+              if (text.includes('save') || ariaLabel.includes('save') ||
+                  text.includes('confirm') || ariaLabel.includes('confirm') ||
+                  text.includes('update') || ariaLabel.includes('update')) {
+
+                // Check if button is enabled (not disabled)
+                const isDisabled = btn.hasAttribute('disabled') ||
+                                   btn.getAttribute('aria-disabled') === 'true' ||
+                                   btn.classList.contains('disabled') ||
+                                   window.getComputedStyle(btn).pointerEvents === 'none';
+
+                if (!isDisabled) {
+                  saveButton = btn;
+                  log('✅ Save button is now enabled:', text || ariaLabel);
+                  break;
+                }
+              }
+            }
+
+            if (saveButton) break;
+
+            // Every 3 seconds, re-blur the input to re-trigger validation
+            if (attempts > 0 && attempts % 6 === 0) {
+              log('🔄 Re-triggering blur event to wake up form validation...');
+
+              // Focus the input
+              passwordInput.focus();
+              await sleep(100);
+
+              // Blur again to re-trigger validation
+              passwordInput.blur();
+              passwordInput.dispatchEvent(new FocusEvent('blur', {
+                bubbles: true,
+                cancelable: true,
+                composed: true
+              }));
+
+              log('🔄 Blur re-triggered, continuing to wait...');
+            }
+
+            // Wait 500ms and try again
+            await sleep(500);
+            attempts++;
+            if (attempts % 4 === 0) {
+              log('⏳ Still waiting for Save button to activate... (' + (attempts * 0.5) + 's)');
+            }
+          }
+
+          if (!saveButton) {
+            return { success: false, error: 'Save button not found or did not activate' };
+          }
+
+          // Step 13: Human thinking pause before clicking
+          await sleep(randomDelay(400, 900));
+
+          if (DRY_RUN) {
+            // DRY RUN MODE - Don't click Save button
+            log('🧪 DRY RUN: Save button found and ready to click');
+            log('🧪 DRY RUN: Skipping actual click (button would be clicked here)');
+            log('🧪 DRY RUN: Password in input field:', newPassword);
+            log('✅ Dry run complete! Everything ready for real execution.');
+          } else {
+            // REAL MODE - Click Save button
+            log('Step 10: Clicking Save button...');
+
+            // Dispatch real click event
+            const clickEvent = new MouseEvent('click', {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              view: window,
+              detail: 1,
+              screenX: 0,
+              screenY: 0,
+              clientX: 0,
+              clientY: 0,
+              button: 0,
+              buttons: 1
+            });
+
+            saveButton.dispatchEvent(clickEvent);
+
+            // Also try direct click as fallback
+            saveButton.click();
+
+            // Wait for save confirmation
+            await sleep(randomDelay(1000, 2000));
+
+            log('✅ Password update complete!');
+          }
+
+          return {
+            success: true,
+            email: '${email}',
+            newPassword: newPassword,
+            timestamp: Date.now()
+          };
+        })();
+      `);
+
+      if (result.success) {
+        addLog(`✅ Password updated successfully for ${email}`);
+        addLog(`🔑 New password: ${result.newPassword}`);
+        setUpdateProgress(prev => ({
+          ...prev,
+          results: [...prev.results, { email, success: true }]
+        }));
+      } else {
+        addLog(`❌ Failed to update ${email}: ${result.error}`);
+        setUpdateProgress(prev => ({
+          ...prev,
+          results: [...prev.results, { email, success: false, error: result.error }]
+        }));
+      }
+
+    } catch (error: any) {
+      addLog(`❌ Error updating ${email}: ${error.message}`);
+      setUpdateProgress(prev => ({
+        ...prev,
+        results: [...prev.results, { email, success: false, error: error.message }]
+      }));
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleUpdateAll = async (dryRun: boolean = true) => {
+    const allMailboxes = domains.flatMap(d => d.mailboxes);
+
+    if (allMailboxes.length === 0) {
+      alert('No mailboxes to update');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `${dryRun ? '🧪 DRY RUN MODE' : '⚠️ LIVE MODE'}\\n\\n` +
+      `You are about to update passwords for ${allMailboxes.length} mailboxes.\\n\\n` +
+      `This will use human-like timing (1-2.5 seconds between each mailbox).\\n` +
+      `Total estimated time: ${Math.round(allMailboxes.length * 8 / 60)} - ${Math.round(allMailboxes.length * 12 / 60)} minutes\\n\\n` +
+      `${dryRun ? '🧪 DRY RUN: Will NOT click Save buttons (testing only)' : '⚠️ LIVE: Will actually update passwords!'}\\n\\n` +
+      `CRITICAL: Test on 1-2 mailboxes first!\\n\\n` +
+      `Continue?`
+    );
+
+    if (!confirmed) return;
+
+    setUpdateLog([]);
+    setUpdateProgress({
+      current: 0,
+      total: allMailboxes.length,
+      status: 'running',
+      results: [],
+    });
+
+    for (let i = 0; i < allMailboxes.length; i++) {
+      const mailbox = allMailboxes[i];
+
+      setUpdateProgress(prev => ({ ...prev, current: i + 1 }));
+
+      await handleUpdatePassword(mailbox.email, dryRun);
+
+      // Anti-detection delay between mailboxes
+      if (i < allMailboxes.length - 1) {
+        const delay = 1000 + Math.random() * 1500; // 1-2.5 seconds
+        setUpdateLog(prev => [...prev, `⏳ Waiting ${(delay/1000).toFixed(1)}s before next mailbox...`]);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+
+      // Mini break every 25 mailboxes
+      if ((i + 1) % 25 === 0 && i < allMailboxes.length - 1) {
+        const breakTime = 3000 + Math.random() * 2000; // 3-5 seconds
+        setUpdateLog(prev => [...prev, `☕ Taking a short break (${(breakTime/1000).toFixed(1)}s) - anti-detection`]);
+        await new Promise(resolve => setTimeout(resolve, breakTime));
+      }
+    }
+
+    setUpdateProgress(prev => ({ ...prev, status: 'completed' }));
+
+    const successCount = updateProgress.results.filter(r => r.success).length;
+    alert(`✅ Batch update complete!\\n\\nSuccess: ${successCount}/${allMailboxes.length}`);
+  };
+
+  const toggleDomain = (domainName: string) => {
+    setDomains(prev =>
+      prev.map(d => (d.name === domainName ? { ...d, isExpanded: !d.isExpanded } : d))
+    );
+  };
+
+  const getTotalMailboxes = () => {
+    return domains.reduce((sum, d) => sum + d.mailboxes.length, 0);
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      className="w-96 flex flex-col text-gray-200"
+      style={{ backgroundColor: '#232321', borderLeft: '1px solid #3c3c3c', height: '100%' }}
+    >
+      {/* Header */}
+      <div className="p-4 flex items-center justify-between border-b border-[#3c3c3c]">
+        <div className="flex items-center gap-2">
+          <div className="p-2 bg-gradient-to-br from-blue-500 to-blue-700 rounded-lg">
+            <Shield className="w-4 h-4 text-white" />
+          </div>
+          <div>
+            <h3 className="font-semibold text-white">SpaceMail Manager</h3>
+            <p className="text-xs text-gray-400">Password Update Tool</p>
+          </div>
+        </div>
+        <button
+          onClick={onClose}
+          className="p-1 rounded text-gray-400 hover:text-gray-200 hover:bg-[#3c3c3c]"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* Controls */}
+      <div className="p-4 border-b border-[#3c3c3c] space-y-2">
+        <button
+          onClick={handleExtract}
+          disabled={isExtracting}
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-gradient-to-r from-blue-500 to-blue-700 hover:from-blue-600 hover:to-blue-800 disabled:from-gray-600 disabled:to-gray-700 text-white text-sm font-medium transition-colors shadow-lg disabled:shadow-none"
+        >
+          {isExtracting ? (
+            <>
+              <RefreshCw className="w-4 h-4 animate-spin" />
+              Extracting...
+            </>
+          ) : (
+            <>
+              <Mail className="w-4 h-4" />
+              Extract Domains
+            </>
+          )}
+        </button>
+      </div>
+
+      {/* Stats */}
+      {domains.length > 0 && (
+        <div className="px-4 py-3 border-b border-[#3c3c3c] bg-[#1f1f1f]">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-gray-400">Domains:</span>
+            <span className="text-white font-semibold">{domains.length}</span>
+          </div>
+          <div className="flex items-center justify-between text-xs mt-1">
+            <span className="text-gray-400">Total Mailboxes:</span>
+            <span className="text-white font-semibold">{getTotalMailboxes()}</span>
+          </div>
+          {selectedMailbox && (
+            <div className="flex items-center justify-between text-xs mt-1">
+              <span className="text-gray-400">Selected:</span>
+              <span className="text-amber-400 font-semibold truncate ml-2">{selectedMailbox.split('@')[0]}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Domain List */}
+      <div className="flex-1 overflow-y-auto custom-scrollbar">
+        {domains.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-center p-8">
+            <Shield className="w-16 h-16 text-gray-600 mb-4" />
+            <p className="text-gray-500 text-sm mb-2">No domains extracted</p>
+            <p className="text-gray-600 text-xs max-w-xs">
+              Click "Extract Domains" after logging into SpaceMail admin dashboard
+            </p>
+          </div>
+        ) : (
+          <div className="p-4 space-y-3">
+            {domains.map((domain, idx) => (
+              <div
+                key={idx}
+                className="bg-[#2d2d2b] rounded-lg overflow-hidden border border-[#3c3c3c]"
+              >
+                {/* Domain Header */}
+                <button
+                  onClick={() => toggleDomain(domain.name)}
+                  className="w-full px-3 py-2 flex items-center justify-between hover:bg-[#3c3c3c] transition-colors"
+                >
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    {domain.isExpanded ? (
+                      <ChevronDown className="w-4 h-4 flex-shrink-0 text-gray-400" />
+                    ) : (
+                      <ChevronRight className="w-4 h-4 flex-shrink-0 text-gray-400" />
+                    )}
+                    <Mail className="w-4 h-4 flex-shrink-0 text-blue-400" />
+                    <span className="text-sm font-medium text-white truncate">{domain.name}</span>
+                  </div>
+                  <span className="text-xs text-gray-400 bg-[#1f1f1f] px-2 py-0.5 rounded">
+                    {domain.mailboxes.length}
+                  </span>
+                </button>
+
+                {/* Mailbox List */}
+                {domain.isExpanded && (
+                  <div className="border-t border-[#3c3c3c]">
+                    {domain.mailboxes.map((mailbox, mIdx) => (
+                      <div key={mIdx} className="flex items-center gap-1">
+                        <button
+                          onClick={() => handleHighlightMailbox(mailbox.email)}
+                          className={`flex-1 px-3 py-2 flex items-center justify-between hover:bg-[#3c3c3c] transition-colors ${
+                            selectedMailbox === mailbox.email ? 'bg-amber-900/20' : ''
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 flex-1 min-w-0">
+                            <div className="w-1 h-1 rounded-full bg-green-400 flex-shrink-0" />
+                            <span className="text-xs text-gray-300 truncate">{mailbox.username}</span>
+                          </div>
+                          {mailbox.hasEditButton && (
+                            <Key className="w-3 h-3 text-gray-500 flex-shrink-0" />
+                          )}
+                        </button>
+                        <button
+                          onClick={() => handleUpdatePassword(mailbox.email)}
+                          disabled={isUpdating}
+                          className="px-2 py-2 hover:bg-green-700 rounded text-green-400 hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Update this mailbox password"
+                        >
+                          <Key className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Update Log */}
+      {updateLog.length > 0 && (
+        <div className="p-4 border-t border-[#3c3c3c] bg-[#1a1a1a] max-h-48 overflow-y-auto custom-scrollbar">
+          <div className="text-xs text-gray-400 font-mono space-y-1">
+            {updateLog.slice(-20).map((log, idx) => (
+              <div key={idx} className="text-gray-300">
+                {log}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Action Panel */}
+      {domains.length > 0 && (
+        <div className="p-4 border-t border-[#3c3c3c] bg-[#1f1f1f] space-y-2">
+          {updateProgress.status === 'running' && (
+            <div className="mb-2">
+              <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
+                <span>Progress:</span>
+                <span className="text-white">{updateProgress.current} / {updateProgress.total}</span>
+              </div>
+              <div className="w-full bg-[#3c3c3c] rounded-full h-2">
+                <div
+                  className="bg-gradient-to-r from-green-500 to-green-700 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${(updateProgress.current / updateProgress.total) * 100}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          <button
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 disabled:from-gray-600 disabled:to-gray-700 text-white text-sm font-medium transition-colors shadow-lg disabled:shadow-none disabled:cursor-not-allowed"
+            onClick={handleUpdateAll}
+            disabled={isUpdating || updateProgress.status === 'running'}
+          >
+            {updateProgress.status === 'running' ? (
+              <>
+                <RefreshCw className="w-4 h-4 animate-spin" />
+                Updating {updateProgress.current}/{updateProgress.total}...
+              </>
+            ) : (
+              <>
+                <Key className="w-4 h-4" />
+                Update All Passwords
+              </>
+            )}
+          </button>
+          <p className="text-xs text-gray-500 text-center">
+            Human-like, undetectable workflow
+          </p>
+          {getTotalMailboxes() > 10 && (
+            <p className="text-xs text-amber-500 text-center flex items-center justify-center gap-1">
+              <AlertCircle className="w-3 h-3" />
+              Test on 1-2 mailboxes first!
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
