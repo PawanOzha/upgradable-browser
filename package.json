@@ -1,7 +1,7 @@
 {
   "name": "agentic-browser",
   "private": true,
-  "version": "1.0.8",
+  "version": "1.0.9",
   "type": "module",
   "description": "A secure, upgradable, and privacy-focused web browser with AI integration.",
   "author": "Pawan Ojha",

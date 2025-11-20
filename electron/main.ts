@@ -568,6 +568,14 @@ function setupAutoUpdater() {
   // Configure auto-updater
   autoUpdater.autoDownload = false; // Don't auto-download, let user decide
   autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.allowDowngrade = true; // Allow installing older versions if needed
+
+  // IMPORTANT: Disable signature verification for unsigned builds
+  // This is necessary for development/testing with unsigned installers
+  // For production, remove this and sign your app properly
+  autoUpdater.forceDevUpdateConfig = true;
+
+  console.log('[AutoUpdater] ⚠️  WARNING: Running in dev mode - signature verification disabled');
 
   // Log update events
   autoUpdater.logger = {

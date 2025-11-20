@@ -21,6 +21,9 @@
       "publishAutoUpdate": true
     }
   ],
+  // Disable signature verification for unsigned builds (development)
+  // Remove this for production with proper code signing
+  "forceCodeSigning": false,
   "mac": {
     "target": [
       "dmg"
