@@ -13,18 +13,23 @@ interface CpanelCredentials {
 
 // Get cPanel credentials from environment
 function getCpanelCredentials(): CpanelCredentials {
-  // In main process, read directly from .env (loaded by vite-plugin-electron)
-  // Try both VITE_ prefixed and non-prefixed versions
-  const username = process.env.VITE_CPANEL_USERNAME || process.env.CPANEL_USERNAME || 'contenti';
-  const apiToken = process.env.VITE_CPANEL_API_TOKEN || process.env.CPANEL_API_TOKEN || '';
+  // SECURITY: Only use non-VITE_ prefixed variables in main process
+  // VITE_ prefixed variables are exposed to renderer process which is insecure
+  const username = process.env.CPANEL_USERNAME || '';
+  const apiToken = process.env.CPANEL_API_TOKEN || '';
 
-  if (!apiToken) {
-    console.error('[cPanel] API token not found in environment variables');
-    console.error('[cPanel] Checked: VITE_CPANEL_API_TOKEN, CPANEL_API_TOKEN');
-    throw new Error('cPanel API token not configured');
+  if (!apiToken || !username) {
+    console.error('[cPanel] Credentials not found in environment variables');
+    console.error('[cPanel] Required: CPANEL_API_TOKEN, CPANEL_USERNAME (without VITE_ prefix)');
+    console.error('[cPanel] Current values:', {
+      hasToken: !!apiToken,
+      hasUsername: !!username
+    });
+    throw new Error('cPanel credentials not configured. Check .env file.');
   }
 
   console.log('[cPanel] Credentials loaded successfully');
+  console.log('[cPanel] Username:', username);
   return { username, apiToken };
 }
 

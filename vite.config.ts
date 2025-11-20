@@ -19,8 +19,8 @@ export default defineConfig(({ mode }) => {
           entry: 'electron/main.ts',
           vite: {
             define: {
-              'process.env.VITE_CPANEL_API_TOKEN': JSON.stringify(env.VITE_CPANEL_API_TOKEN),
-              'process.env.VITE_CPANEL_USERNAME': JSON.stringify(env.VITE_CPANEL_USERNAME),
+              // Only inject non-VITE_ prefixed credentials into main process
+              // VITE_ prefixed vars are automatically exposed to renderer, which is insecure
               'process.env.CPANEL_API_TOKEN': JSON.stringify(env.CPANEL_API_TOKEN),
               'process.env.CPANEL_USERNAME': JSON.stringify(env.CPANEL_USERNAME),
             },
